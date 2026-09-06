@@ -37,6 +37,13 @@ if (handshake === null) {
   process.exit(1);
 }
 
+if (deal.length === 0) {
+  console.log(`\n${room}: no rows in this file.`);
+  console.log("  An empty deal room reads the same whether it was censored or simply expired:");
+  console.log("  the venue deletes a room after seven days with no write, and a terminal deal");
+  console.log("  stops writing. Absence here is not a finding either way.");
+}
+
 const folded = foldTranscript([handshake.offer, handshake.accept, ...deal]);
 for (const step of folded.steps) {
   const verdict = step.ok ? "ok " : "BAD";
@@ -48,7 +55,10 @@ if (folded.warnings?.length) {
   for (const w of folded.warnings) console.error(`  WARN: ${w}`);
   // A gap or reordering can flip claimed↔refunded with no BAD verdict (see #93).
   // A backwards timestamp can flip a deadline with all signatures valid.
-  const fatal = folded.warnings.some((w) => w.includes("gap detected") || w.includes("seq not strictly increasing") || w.includes("timestamp goes backwards"));
+  // A missing seq 1 in a derived-convention room is the same class of defect as a gap: a signed
+  // row the file does not carry. It has no surviving predecessor, so the pairwise walk above
+  // stays silent on it, which is exactly why it has to be fatal here too.
+  const fatal = folded.warnings.some((w) => w.includes("gap detected") || w.includes("seq not strictly increasing") || w.includes("timestamp goes backwards") || w.includes("no authenticated seq 1"));
   if (fatal) {
     console.error("\nevidence → INCOMPLETE: transcript is not per-room contiguous/monotonic — a signed row is missing or reordered. Refusing to treat fold as audit proof");
     process.exit(1);

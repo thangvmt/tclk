@@ -13,6 +13,8 @@ import { applyFrame, openContract, type ContractState } from "./machine.js";
 import { dealRoom, OFFER_ROOM } from "./technocore.js";
 
 const ROOM_NAME = /^[a-z0-9][a-z0-9_-]{0,47}$/;
+/** The shape `dealRoom()` mints: `mb-p-tclk-<first 16 hex of the contract id>`. */
+const DEAL_ROOM_NAME = /^mb-p-tclk-[0-9a-f]{16}$/;
 const NONCE = /^(?:0|[1-9][0-9]*)$/;
 const SIGNATURE = /^[A-Za-z0-9_-]{85}[AQgw]$/;
 const TIMESTAMP = /^\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\d|3[01])T(?:[01]\d|2[0-3]):[0-5]\d:[0-5]\d(?:\.\d+)?(?:Z|[+-](?:[01]\d|2[0-3]):[0-5]\d)$/;
@@ -280,6 +282,30 @@ export function foldTranscript(records: readonly TranscriptRecord[]): Transcript
       if (cur.timestampMs < prev.timestampMs) {
         warnings.push(
           `room ${room}: timestamp goes backwards at seq ${cur.seq} (${prev.timestampMs} -> ${cur.timestampMs}) — ts is venue metadata, not signed`,
+        );
+      }
+    }
+    // The walk above compares kept rows to each other, so it cannot see a dropped row that has
+    // no surviving predecessor. Removing a room's opening row leaves `2,3,4`: contiguous,
+    // every signature intact, nothing for a pairwise check to catch.
+    //
+    // A room matching the derived-room convention is the one place the first position is
+    // readable. `dealRoom()` mints that name from a contract id, so by convention such a room
+    // carries one contract's post-accept frames and is small enough that the venue's ring has
+    // not evicted its front. The name alone does not prove that binding, and this warning does
+    // not claim it does. On the shared board neither property holds: thousands of contracts
+    // interleave and a legitimate window begins wherever the ring now starts, so the anchor is
+    // scoped to the convention and does not generalise.
+    //
+    // Only authenticated rows are counted, so this says nothing about why seq 1 is missing: it
+    // may have been removed, or it may be present but unsigned or malformed. And like every
+    // check here it is evidence of absence, not of presence: a supplier that renumbers the rows
+    // it keeps still leaves a clean `1..n`.
+    if (DEAL_ROOM_NAME.test(room)) {
+      const firstSeq = list.reduce((min, r) => (r.seq < min ? r.seq : min), list[0]!.seq);
+      if (firstSeq !== 1) {
+        warnings.push(
+          `room ${room}: no authenticated seq 1 is present (lowest is ${firstSeq}) in a room matching the derived-room convention — the opening row has no predecessor for the pairwise check to compare against`,
         );
       }
     }

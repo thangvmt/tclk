@@ -11,6 +11,7 @@ import {
   foldTranscript,
   generateHashLock,
   makeAccept,
+  makeHeartbeat,
   makeOffer,
   parseTranscriptExport,
   verifyTranscriptRecord,
@@ -256,6 +257,46 @@ describe("trusted transcript records", () => {
     expect(tampered.steps.every((s) => s.ok)).toBe(true);
     expect(tampered.warnings.some((w) => w.includes("gap detected"))).toBe(false);
     expect(tampered.warnings.some((w) => w.includes("seq not strictly"))).toBe(false);
+  });
+
+  it("flags a derived deal room whose opening row is absent, which the pairwise walk cannot see", () => {
+    const { lock, offer, accept } = deal();
+    const room = dealRoom(accept.contract);
+    const offerRec = record(BOARD, 1, NOW - 2, payer, encodeFrame(offer));
+    const acceptRec = record(BOARD, 2, NOW - 1, payee, encodeFrame(accept));
+
+    const beat = makeHeartbeat({ from: payer.did, contract: accept.contract });
+    const beatRec = record(room, 1, NOW, payer, encodeFrame(beat));
+    const lockRec = record(room, 2, NOW + 1, payer, encodeFrame({
+      type: "lock" as const, from: payer.did, contract: accept.contract, rail: "flop-htlc", ref: "escrow-42",
+    }));
+    const revealRec = record(room, 3, NOW + 2, payee, encodeFrame({
+      type: "reveal" as const, from: payee.did, contract: accept.contract, secret: lock.preimage,
+    }));
+    const receiptRec = record(room, 4, NOW + 3, payer, encodeFrame({
+      type: "receipt" as const, from: payer.did, contract: accept.contract, outcome: "claimed" as const,
+    }));
+
+    const whole = foldTranscript([offerRec, acceptRec, beatRec, lockRec, revealRec, receiptRec]);
+    expect(whole.state?.status).toBe("claimed");
+    expect(whole.warnings.some((w) => w.includes("no authenticated seq 1"))).toBe(false);
+
+    // Supplier drops the room's opening row. What it keeps is 2,3,4: contiguous to each
+    // other, every signature intact, and the fold still reaches claimed.
+    const censored = foldTranscript([offerRec, acceptRec, lockRec, revealRec, receiptRec]);
+    expect(censored.state?.status).toBe("claimed");
+    expect(censored.steps.every((s) => s.ok)).toBe(true);
+    expect(censored.warnings.some((w) => w.includes("gap detected"))).toBe(false);
+    expect(censored.warnings.some((w) => w.includes("seq not strictly"))).toBe(false);
+    expect(censored.warnings.some((w) => w.includes(`${room}: no authenticated seq 1 is present (lowest is 2)`))).toBe(true);
+
+    // The anchor is scoped to the derived name: the shared board legitimately begins
+    // wherever the ring now starts, so the same shape there must stay silent.
+    const boardOnly = foldTranscript([
+      record(BOARD, 7, NOW - 2, payer, encodeFrame(offer)),
+      record(BOARD, 8, NOW - 1, payee, encodeFrame(accept)),
+    ]);
+    expect(boardOnly.warnings.some((w) => w.includes("no authenticated seq 1"))).toBe(false);
   });
 
   it("never synthesizes offer-before-accept order while selecting a board handshake", () => {

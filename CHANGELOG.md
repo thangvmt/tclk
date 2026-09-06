@@ -8,6 +8,12 @@ All notable changes to this project are documented here. Format follows
 
 ### Fixed
 
+- `foldTranscript` now warns when a room matching the derived-room convention carries no
+  authenticated `seq 1`. The existing pairwise walk compares kept rows to each other, so a
+  removed opening row leaves a contiguous `2,3,4` and passes silently; this anchor covers the
+  one position no neighbour can vouch for. `audit-export.mjs` treats it as INCOMPLETE and exits
+  non-zero, as it already does for gaps, reordering and backwards timestamps.
+
 - `tclk_post_frame` now accepts exact decimal-string nonces in addition to safe integer
   numbers, so signed Technocore nonces above JavaScript's safe-integer range are preserved
   without precision loss. Unsafe numeric nonces (> 2^53 - 1) are rejected at the MCP schema

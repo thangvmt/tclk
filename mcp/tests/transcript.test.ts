@@ -6,7 +6,10 @@
 
 import { describe, expect, it } from "vitest";
 
-import { dealRoom, decodeFrame, type TranscriptRecord } from "@flop-labs/tclk";
+import {
+  dealRoom, decodeFrame, encodeFrame, generateHashLock, makeAccept, makeHeartbeat, makeOffer,
+  type TranscriptRecord,
+} from "@flop-labs/tclk";
 
 import { canonicalMessage, signerFromSeed } from "../src/signing.js";
 import { createHandlers } from "../src/tools.js";
@@ -19,6 +22,9 @@ const payer = signerFromSeed(hexToBytes(PAYER_SEED));
 const payee = signerFromSeed(hexToBytes(PAYEE_SEED));
 
 function records(lines: string[], timestampMs: number | number[]): TranscriptRecord[] {
+  // seq is per room on the venue, so number it per room here too. A single global counter
+  // made the derived room start at 2 and tripped the derived-room anchor on the happy path.
+  const nextSeq = new Map<string, number>();
   return lines.map((line, index) => {
     let from = PAYER_DID;
     let room = "mb-p-tclk-deadbeefdeadbeef";
@@ -32,9 +38,11 @@ function records(lines: string[], timestampMs: number | number[]): TranscriptRec
     }
     const signer = from === PAYEE_DID ? payee : payer;
     const nonce = String(1000 + index);
+    const seq = (nextSeq.get(room) ?? 0) + 1;
+    nextSeq.set(room, seq);
     return {
       room,
-      seq: index,
+      seq,
       timestampMs: typeof timestampMs === "number" ? timestampMs : timestampMs[index]!,
       sender: signer.did,
       nonce,
@@ -88,6 +96,11 @@ describe("happy path", () => {
     });
     expect(result.rail).toBe("flop-htlc");
     expect(result.railRef).toBe("escrow-42");
+    // A whole transcript carries the standing ts/seq trust-boundary note and nothing else.
+    // Numbering seq globally across the board and the deal room used to start the derived
+    // room at 2 and trip the completeness anchor here, silently, because nothing asserted.
+    expect(result.warnings.some((w: string) => w.includes("no authenticated seq 1"))).toBe(false);
+    expect(result.warnings.some((w: string) => w.includes("gap detected"))).toBe(false);
 
     // The revealed secret is in the transcript the caller already holds; this server
     // reports only that one exists.
@@ -173,4 +186,33 @@ describe("fail-closed folding", () => {
       records: records(["gm", "still not a frame"], NOW),
     })).toThrow(/no authenticated offer frame/);
   });
+  it("propagates the derived-room completeness warning through tclk_apply_transcript", () => {
+    const lock = generateHashLock();
+    const offer = makeOffer(HASH_OFFER);
+    const accept = makeAccept(offer, { from: PAYEE_DID, statement: lock.hash });
+    const room = dealRoom(accept.contract);
+
+    const lines = [
+      encodeFrame(offer),
+      encodeFrame(accept),
+      encodeFrame(makeHeartbeat({ from: PAYER_DID, contract: accept.contract })),
+      encodeFrame({ type: "lock", from: PAYER_DID, contract: accept.contract, rail: "flop-htlc", ref: "escrow-42" }),
+      encodeFrame({ type: "reveal", from: PAYEE_DID, contract: accept.contract, secret: lock.preimage }),
+      encodeFrame({ type: "receipt", from: PAYER_DID, contract: accept.contract, outcome: "claimed" }),
+    ];
+    const whole = records(lines, NOW);
+    expect(whole.filter((r) => r.room === room).map((r) => r.seq)).toEqual([1, 2, 3, 4]);
+    const wholeWarnings = h.tclk_apply_transcript({ records: whole }).warnings;
+    expect(wholeWarnings.some((w: string) => w.includes("no authenticated seq 1"))).toBe(false);
+
+    // Drop the deal room's opening row. What remains is 2,3,4: contiguous, every signature
+    // intact, and the fold still claims. An agent folding through this server has to be told.
+    const censored = whole.filter((r) => !(r.room === room && r.seq === 1));
+    const result = h.tclk_apply_transcript({ records: censored });
+    expect(result.status).toBe("claimed");
+    expect(result.steps.every((step) => step.ok)).toBe(true);
+    expect(result.warnings.some((w: string) => w.includes("gap detected"))).toBe(false);
+    expect(result.warnings.some((w: string) => w.includes("no authenticated seq 1"))).toBe(true);
+  });
+
 });
