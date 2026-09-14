@@ -147,6 +147,30 @@ describe("transcript fold cost", () => {
     expect(counter.verifications).toBe(rows.length);
   });
 
+  // @stupeterwilliams-ui counted this case on #115 and it is the sharp one: when every record
+  // fails verification, each pass still verifies before it can skip, and the hasDeadlineFrame
+  // probe's `some` returns false for an unverified record rather than short-circuiting. So the
+  // unpatched fold walks the whole array three times and pays full Ed25519 cost with zero decode
+  // work to show for it. That is the corpus foldTranscript exists to handle, so it is the one
+  // worth pinning.
+  it("verifies once per record even when every record fails verification", () => {
+    const rows = Array.from({ length: 20 }, (_, i) => ({
+      room: BOARD,
+      seq: i + 1,
+      timestampMs: NOW + i,
+      sender: payer.did,
+      nonce: String(10_000 + i),
+      signature: "A".repeat(86),
+      line: `not a frame ${i}`,
+    }));
+
+    counter.verifications = 0;
+    const folded = foldTranscript(rows);
+
+    expect(folded.steps.every((step) => !step.ok)).toBe(true);
+    expect(counter.verifications).toBe(rows.length);
+  });
+
   it("does not re-verify a record whose line is not a TCLK frame", () => {
     const rows = [
       ...claimedDeal(),
