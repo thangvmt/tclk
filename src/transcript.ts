@@ -257,24 +257,39 @@ export function foldTranscript(records: readonly TranscriptRecord[]): Transcript
   // Only verified rows count for gaps — an unsigned/BAD row still shows as BAD in
   // `steps` but must not make a censored verified seq look contiguous (e.g. verified
   // 1,3 padded with unverified 2 should still be a gap).
-  const byRoom = new Map<string, TranscriptRecord[]>();
-  for (const r of records) {
-    if (!verifyTranscriptRecord(r).ok) continue;
-    const list = byRoom.get(r.room) ?? [];
-    list.push(r);
-    byRoom.set(r.room, list);
+  // Verify once, here, and reuse the result. Ed25519 dominates the cost of a large
+  // retained export, so gap analysis, the deadline probe and the fold must not each
+  // re-verify the same row. The frame is decoded in the same pass, and only for rows
+  // that verify — an unverified row never reaches `tryDecodeFrame` in the fold either.
+  const checked = records.map((record, index) => {
+    const verification = verifyTranscriptRecord(record);
+    return {
+      record,
+      index,
+      verification,
+      frame: verification.ok ? tryDecodeFrame(record.line) : null,
+    };
+  });
+
+  const byRoom = new Map<string, typeof checked>();
+  for (const entry of checked) {
+    if (!entry.verification.ok) continue;
+    const list = byRoom.get(entry.record.room) ?? [];
+    list.push(entry);
+    byRoom.set(entry.record.room, list);
   }
   for (const [room, list] of byRoom) {
     for (let i = 1; i < list.length; i += 1) {
-      const prev = list[i - 1]!;
-      const cur = list[i]!;
+      const prev = list[i - 1]!.record;
+      const cur = list[i]!.record;
+      const at = list[i]!.index;
       if (cur.seq <= prev.seq) {
         warnings.push(
-          `room ${room}: seq not strictly increasing at index ${records.indexOf(cur)} (${prev.seq} -> ${cur.seq}) — supplied order is not per-room append order`,
+          `room ${room}: seq not strictly increasing at index ${at} (${prev.seq} -> ${cur.seq}) — supplied order is not per-room append order`,
         );
       } else if (cur.seq !== prev.seq + 1) {
         warnings.push(
-          `room ${room}: gap detected (seq ${prev.seq} -> ${cur.seq} at index ${records.indexOf(cur)}) — transcript may be partial; a missing reveal/lock can flip claimed↔refunded with no BAD verdict`,
+          `room ${room}: gap detected (seq ${prev.seq} -> ${cur.seq} at index ${at}) — transcript may be partial; a missing reveal/lock can flip claimed↔refunded with no BAD verdict`,
         );
       }
       if (cur.timestampMs < prev.timestampMs) {
@@ -285,26 +300,22 @@ export function foldTranscript(records: readonly TranscriptRecord[]): Transcript
     }
   }
   // Generic trust-boundary warning when any verified deadline-sensitive frame is present.
-  const hasDeadlineFrame = records.some((r) => {
-    if (!verifyTranscriptRecord(r).ok) return false;
-    const f = tryDecodeFrame(r.line);
-    return f !== null && (f.type === "accept" || f.type === "lock" || f.type === "reveal" || f.type === "refund");
-  });
+  const hasDeadlineFrame = checked.some(({ frame: f }) =>
+    f !== null && (f.type === "accept" || f.type === "lock" || f.type === "reveal" || f.type === "refund"),
+  );
   if (hasDeadlineFrame) {
     warnings.push(
       "timestamps and seq are venue metadata, not covered by the Ed25519 signature (room|nonce|line only); a file supplier can rewrite ts to move a reveal across refundAfterMs and flip claimed↔refunded with all signatures valid — verify settlement on the rail",
     );
   }
 
-  records.forEach((record, index) => {
+  checked.forEach(({ record, index, verification, frame }) => {
     const base = { index, room: record?.room ?? "", seq: record?.seq ?? -1 };
-    const verification = verifyTranscriptRecord(record);
     if (!verification.ok) {
       steps.push({ ...base, ok: false, reason: verification.reason });
       return;
     }
 
-    const frame = tryDecodeFrame(record.line);
     if (frame === null) {
       steps.push({ ...base, ok: false, reason: decodeReason(record.line) });
       return;
